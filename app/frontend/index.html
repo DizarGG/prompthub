@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PromptHub — хранилище промптов</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <main class="max-w-6xl mx-auto p-5 md:p-10 space-y-8">
+    <header class="flex flex-wrap items-center justify-between gap-4">
+      <div><p class="text-indigo-400 font-semibold">✦ PromptHub</p><h1 class="text-3xl md:text-5xl font-bold mt-2">Создавайте. Сохраняйте. Делитесь.</h1><p class="text-slate-400 mt-3">Генератор промптов на локальной модели Qwen и общая библиотека.</p></div>
+      <a href="http://localhost:8000/docs" class="text-sm text-indigo-300 underline">API Docs</a>
+    </header>
+    <p id="notice" role="status" aria-live="polite" class="hidden rounded-xl px-4 py-3 bg-slate-800"></p>
+    <section class="grid md:grid-cols-2 gap-5">
+      <div class="rounded-2xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+        <h2 class="text-xl font-semibold">1. Аккаунт</h2>
+        <p class="text-sm text-slate-400">Регистрация нужна для сохранения. Генерация и просмотр общедоступны.</p>
+        <input id="username" aria-label="Логин" placeholder="Логин" class="field w-full" autocomplete="username">
+        <input id="email" aria-label="Email" type="email" placeholder="Email (для регистрации)" class="field w-full" autocomplete="email">
+        <input id="password" aria-label="Пароль" type="password" placeholder="Пароль (не менее 8 символов)" class="field w-full" autocomplete="current-password">
+        <div class="flex gap-3 flex-wrap"><button id="register" class="btn bg-slate-700">Регистрация</button><button id="login" class="btn bg-indigo-600">Войти</button><button id="logout" class="btn bg-slate-700">Выйти</button></div>
+        <p id="auth-status" class="text-sm text-slate-400">Гость</p>
+      </div>
+      <div class="rounded-2xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+        <h2 class="text-xl font-semibold">2. Создать промпт</h2>
+        <label for="task" class="text-sm text-slate-400">Опишите вашу задачу</label>
+        <textarea id="task" rows="5" maxlength="2000" class="field w-full" placeholder="Напиши промпт для создания плана изучения Python..."></textarea>
+        <button id="generate" class="btn bg-indigo-600 w-full">✨ Сгенерировать с Qwen</button>
+        <label for="result" class="text-sm text-slate-400">Готовый промпт (можно редактировать)</label>
+        <textarea id="result" rows="6" class="field w-full" placeholder="Здесь появится результат..."></textarea>
+      </div>
+    </section>
+    <section class="rounded-2xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+      <h2 class="text-xl font-semibold">3. Добавить в общую библиотеку</h2>
+      <input id="title" maxlength="200" placeholder="Название промпта" class="field w-full">
+      <textarea id="description" maxlength="2000" rows="2" placeholder="Краткое описание" class="field w-full"></textarea>
+      <button id="save" class="btn bg-emerald-600">Сохранить промпт</button>
+    </section>
+    <section class="space-y-4">
+      <div class="flex flex-wrap gap-3 justify-between items-center"><h2 class="text-2xl font-semibold">Библиотека промптов</h2><div class="flex gap-2"><input id="search" placeholder="Поиск по названию" class="field"><button id="refresh" class="btn bg-slate-700">Найти</button></div></div>
+      <div id="items" class="grid md:grid-cols-2 gap-4"></div>
+      <button id="more" class="btn bg-slate-700 hidden">Показать ещё</button>
+    </section>
+  </main>
+<style type="text/tailwindcss">@layer components {.field {@apply rounded-xl border border-slate-700 bg-slate-800 p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500;} .btn {@apply rounded-xl px-5 py-3 font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed;}}</style>
+<script>
+  // Единственное место, где меняется адрес сервера при раздельном запуске фронтенда.
+  const API_BASE = window.location.port === '8000' ? window.location.origin : 'http://localhost:8000';
+  const $ = (id) => document.getElementById(id);
+  let token = sessionStorage.getItem('access_token') || '';
+  let currentUser = null;
+  let offset = 0;
+  const PAGE_SIZE = 20;
+  function notify(message, error = false) {
+    $('notice').textContent = message;
+    $('notice').classList.remove('hidden');
+    $('notice').classList.toggle('text-red-300', error);
+    $('notice').classList.toggle('text-emerald-300', !error);
+  }
+  async function api(path, options = {}) {
+    const headers = {...(options.headers || {})};
+    if (token && path !== '/login' && path !== '/users') headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(`${API_BASE}${path}`, {...options, headers});
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try { const body = await response.json(); detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail); } catch (_) {}
+      throw new Error(detail);
+    }
+    return response.status === 204 ? null : response.json();
+  }
+  function showAuth() { $('auth-status').textContent = currentUser ? `Вы вошли как ${currentUser.username}` : 'Гость'; }
+  async function loadProfile() {
+    if (!token) { currentUser = null; showAuth(); return; }
+    try { currentUser = await api('/protected/profile'); }
+    catch (_) { token = ''; sessionStorage.removeItem('access_token'); currentUser = null; }
+    showAuth();
+  }
+  $('register').onclick = async () => {
+    try {
+      await api('/users', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:$('username').value.trim(),email:$('email').value.trim(),password:$('password').value})});
+      notify('Регистрация успешна. Теперь войдите.');
+    } catch(e) { notify(e.message, true); }
+  };
+  $('login').onclick = async () => {
+    try {
+      const form = new URLSearchParams({username:$('username').value.trim(), password:$('password').value});
+      const data = await api('/login', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:form});
+      token = data.access_token;
+      sessionStorage.setItem('access_token', token);
+      await loadProfile(); notify('Вы вошли в аккаунт.'); await loadProjects();
+    } catch(e) { notify(e.message, true); }
+  };
+  $('logout').onclick = async () => { token = ''; sessionStorage.removeItem('access_token'); currentUser = null; showAuth(); notify('Вы вышли из аккаунта.'); await loadProjects(); };
+  $('generate').onclick = async () => {
+    const button = $('generate'); button.disabled = true; button.textContent = 'Генерация…';
+    try { const data = await api('/AI/generate', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({promt:$('task').value})}); $('result').value = data.promt; notify('Промпт готов. Можно отредактировать и сохранить.'); }
+    catch(e) { notify(e.message, true); }
+    finally { button.disabled = false; button.textContent = '✨ Сгенерировать с Qwen'; }
+  };
+  $('save').onclick = async () => {
+    if (!token) { notify('Для сохранения войдите в аккаунт.', true); return; }
+    try { await api('/projects', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value.trim(),description:$('description').value.trim(),content:$('result').value.trim()})}); notify('Промпт сохранён.'); await loadProjects(); }
+    catch(e) { notify(e.message, true); }
+  };
+  function makeCard(item) {
+    const card = document.createElement('article'); card.className = 'bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3';
+    const h3 = document.createElement('h3'); h3.className = 'font-semibold text-lg'; h3.textContent = item.title;
+    const desc = document.createElement('p'); desc.className = 'text-slate-400 text-sm'; desc.textContent = item.description;
+    const text = document.createElement('pre'); text.className = 'whitespace-pre-wrap break-words text-sm bg-slate-800 rounded-lg p-3 max-h-64 overflow-auto'; text.textContent = item.content;
+    const actions = document.createElement('div'); actions.className = 'flex gap-3 flex-wrap';
+    const copy = document.createElement('button'); copy.className = 'btn bg-slate-700 text-sm'; copy.textContent = 'Копировать';
+    copy.onclick = async () => { try { await navigator.clipboard.writeText(item.content); notify('Скопировано.'); } catch (_) { notify('Не удалось скопировать: откройте сайт через localhost или HTTPS.', true); }};
+    actions.append(copy);
+    if (currentUser && currentUser.id === item.author_id) {
+      const del = document.createElement('button'); del.className = 'btn bg-rose-900 text-sm'; del.textContent = 'Удалить';
+      del.onclick = async () => { if (!confirm('Удалить промпт?')) return; try { await api(`/projects/${item.id}`, {method:'DELETE'}); await loadProjects(); } catch(e) { notify(e.message, true); }};
+      actions.append(del);
+    }
+    card.append(h3, desc, text, actions); return card;
+  }
+  async function loadProjects(append = false) {
+    if (!append) { offset = 0; $('items').replaceChildren(); }
+    try {
+      const q = encodeURIComponent($('search').value.trim());
+      const items = await api(`/projects?q=${q}&skip=${offset}&limit=${PAGE_SIZE}`);
+      items.forEach(item => $('items').append(makeCard(item)));
+      offset += items.length;
+      $('more').classList.toggle('hidden', items.length < PAGE_SIZE);
+      if (!offset) { const p = document.createElement('p'); p.className = 'text-slate-400'; p.textContent = 'Промптов пока нет.'; $('items').append(p); }
+    } catch(e) { notify(e.message, true); }
+  }
+  $('refresh').onclick = () => loadProjects();
+  $('search').onkeydown = (e) => { if (e.key === 'Enter') loadProjects(); };
+  $('more').onclick = () => loadProjects(true);
+  (async () => { await loadProfile(); await loadProjects(); })();
+</script>
+</body>
+</html>
